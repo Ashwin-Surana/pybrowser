@@ -15,6 +15,7 @@ PROXIES = {"https": "https://{}:{}/".format(PROXY_HOST, PROXY_PORT),
            }
 
 DEFAULT_TIMEOUT = 100
+TIMEOUT = 100
 REDIRECT_CODES = [301, 302, 303, 307]
 
 
@@ -43,61 +44,69 @@ class SessionDestroyException(Exception):
         Exception.__init__(self, 'ERROR DESTROYING SESSION: ' + msg)
 
 
-class CrawleraSession(requests.Session):
-    def __init__(self, api_key, user_agent=None, cert='crawlera-ca.crt', timeout=DEFAULT_TIMEOUT, debug=False):
-        requests.Session.__init__(self)
+class CrawleraSession:
+    def __init__(self, api_key, user_agent=None, cert='crawlera-ca.crt', debug=False, max_tries=3):
         self.api_key = api_key
         self.user_agent = user_agent
         self.cert = cert
-        self.timeout = timeout
         self.debug = debug
+        self.session = requests.session()
+        self.max_tries = max_tries
+        self.cookies = self.session.cookies
         self.proxy_auth = HTTPProxyAuth(api_key, "")
         self.server_auth = HTTPBasicAuth(api_key, "")
-        self.__create_session()
+        self.__create_session();
 
     def __create_session(self):
         url = "http://proxy.crawlera.com:8010/sessions"
-        response = requests.post(url, auth=self.server_auth, timeout=self.timeout, verify=self.cert)
+        response = requests.post(url, auth=self.server_auth, timeout=TIMEOUT, verify=self.cert)
         if response.status_code == 200:
             self.session_id = response.text
-            self.headers["X-Crawlera-Session"] = response.text
+            self.session.headers["X-Crawlera-Session"] = response.text
             if self.user_agent is not None:
-                self.headers['X-Crawlera-UA'] = 'pass'
-                self.headers['User-agent'] = self.user_agent
+                self.session.headers['X-Crawlera-UA'] = 'pass'
+                self.session.headers['User-agent'] = self.user_agent
         else:
             raise Exception("Problem creating session. RESPONSE CODE: " + str(response.status_code))
 
-    @debug
-    def get(self, url):
+    def head(self, url, **kwargs):
+        while True:
+            response = self.session.head(self, url, **kwargs)
+            if response.status_code in REDIRECT_CODES:
+                if 'location' in response.headers:
+                    url = response.headers['location']
+
+            else:
+                return url
+
+    def get(self, url, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             params = {
                 'proxies': PROXIES,
                 'auth': self.proxy_auth,
-                'timeout': self.timeout,
+                'timeout': TIMEOUT,
                 'verify': self.cert,
-                'allow_redirects' : False
+                'allow_redirects': False
             }
-            response = super(CrawleraSession, self).get(url, **params)
-
-            while response.status_code in REDIRECT_CODES:
-                if 'location' in response.headers:
-                    url = response.headers['location']
-                    response = super(CrawleraSession, self).get(url, **params)
+            params.update(kwargs)
+            for i in xrange(self.max_tries):
+                response = self.session.get(url, **params)
+                if response.status_code in REDIRECT_CODES:
+                    if 'location' in response.headers:
+                        url = response.headers['location']
                 else:
-                    break
-            return response
+                    return response
 
-    @debug
     def post(self, url, data):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return self.post(url, proxies=PROXIES, auth=self.proxy_auth, data=data, timeout=self.timeout,
-                             verify=self.cert, allow_redirects=False)
+            return self.session.post(url, proxies=PROXIES, auth=self.proxy_auth, data=data, timeout=TIMEOUT,
+                                     verify=self.cert, allow_redirects=False)
 
     def destroy(self):
         url = "http://proxy.crawlera.com:8010/sessions/" + self.session_id
-        response = requests.delete(url, auth=self.server_auth, timeout=DEFAULT_TIMEOUT, verify=self.cert)
+        response = requests.delete(url, auth=self.server_auth, timeout=TIMEOUT, verify=self.cert)
         if response.status_code != 204:
             raise Exception("Problem destroying session. RESPONSE CODE: " + self.status_code)
 
@@ -116,40 +125,27 @@ class CrawleraSession(requests.Session):
         sessions = response.json()
         for session in sessions.keys():
             url = "http://proxy.crawlera.com:8010/sessions/" + session
-            response = requests.delete(url, auth=self.server_auth, timeout=DEFAULT_TIMEOUT, verify=self.cert)
+            response = requests.delete(url, auth=self.server_auth, timeout=TIMEOUT, verify=self.cert)
             if response.status_code != 204:
                 raise Exception("Problem destroying session. RESPONSE CODE: " + self.status_code)
 
 
 class Crawlera:
-    def __init__(self, api_key, user_agent=None, cert='crawlera-ca.crt', timeout=None, debug=False, max_tries=5):
+    def __init__(self, api_key, user_agent=None, cert='crawlera-ca.crt', log=False):
         self.user_agent = user_agent
-        self.max_tries = max_tries
         self.api_key = api_key
-        self.timeout = timeout
         self.cert = cert
-        self.debug = debug
+        self.log = log
         self.proxy_auth = HTTPProxyAuth(self.api_key, "")
 
-    @debug
-    def get(self, url, **kwargs):
-        retry = 0
-        with warnings.catch_warnings():
-            if self.timeout is not None:
-                kwargs['timeout'] = self.timeout
-            warnings.simplefilter("ignore")
-            response = requests.get(url, proxies=PROXIES, auth=self.proxy_auth, verify=self.cert, **kwargs)
-            while response.status_code != 200 and retry < self.max_tries:
-                response = requests.get(url, proxies=PROXIES, auth=self.proxy_auth, verify=self.cert, **kwargs)
-                retry += 1
-                print 'RETRY'
-            return response
+    def get(self, url):
+        return requests.get(url, proxies=PROXIES, auth=self.proxy_auth, timeout=TIMEOUT, verify=self.cert)
 
-    @debug
-    def post(self, url, data=None, json=None, **kwargs):
-        if self.timeout is not None:
-            kwargs['timeout'] = self.timeout
-        response = requests.post(url, proxies=PROXIES, auth=self.proxy_auth, data=data, json=json,
+    def get_session(self):
+        return CrawleraSession(self.api_key, self.user_agent)
+
+    def post(self, url, data):
+        response = requests.post(url, proxies=PROXIES, auth=self.proxy_auth, data=data, timeout=TIMEOUT,
                                  verify=self.cert)
         return response
 

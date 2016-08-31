@@ -3,3 +3,5 @@
 build
 **/.pyc
 .idea
+pybrowser/__init__.pyc
+pybrowser/crawlera.pyc
