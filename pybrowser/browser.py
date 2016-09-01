@@ -13,6 +13,8 @@ USER_AGENTS = [
     r'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
 ]
 
+REDIRECT_CODES = [301, 302, 303, 307]
+
 
 def header_generator(host=None, user_agent=None):
     header = {
@@ -50,11 +52,12 @@ def debug(http_method_func):
 
 
 class Session(requests.Session):
-    def __init__(self, user_agent=None, headers=None, timeout=None, debug=False):
+    def __init__(self, user_agent=None, headers=None, timeout=None, proxies={}, debug=False):
+        requests.Session.__init__(self)
         self.debug = debug
         self.timeout = timeout
+        self.proxies.update(proxies)
         self.user_agent = choice(USER_AGENTS) if user_agent is None else user_agent
-        requests.Session.__init__(self)
         if headers is None:
             self.headers = header_generator(user_agent=self.user_agent)
         else:
@@ -62,20 +65,54 @@ class Session(requests.Session):
 
     @debug
     def get(self, url, **kwargs):
-        if self.timeout is not None:
-            kwargs['timeout'] = self.timeout
         self.headers["Host"] = get_host(url)
         response = super(Session, self).get(url, **kwargs)
-        response.raise_for_status()
         return response
 
     @debug
     def post(self, url, data=None, json=None, **kwargs):
+        self.headers["Host"] = get_host(url)
+        response = super(Session, self).post(url, data=data, json=json, **kwargs)
+        return response
+
+
+class ProxySession(Session):
+    def __init__(self, user_agent=None, headers=None, timeout=None, proxies={}, manual_redirects=True, debug=False):
+        Session.__init__(self, user_agent, headers, timeout, proxies, debug)
+        self.manual_redirects = manual_redirects
+
+    @debug
+    def get(self, url, **kwargs):
+        self.headers["Host"] = get_host(url)
+        if self.manual_redirects:
+            kwargs['allow_redirects'] = False
+        response = super(ProxySession, self).get(url, **kwargs)
+
+        if self.manual_redirects:
+            while response.status_code in REDIRECT_CODES:
+                if 'location' in response.headers:
+                    url = response.headers['location']
+                    response = super(ProxySession, self).get(url, **kwargs)
+                else:
+                    return response
+        return response
+
+    @debug
+    def post(self, url, **kwargs):
         if self.timeout is not None:
             kwargs['timeout'] = self.timeout
         self.headers["Host"] = get_host(url)
-        response = super(Session, self).post(url, data=data, json=json, **kwargs)
-        response.raise_for_status()
+        if self.manual_redirects:
+            kwargs['allow_redirects'] = False
+        response = super(ProxySession, self).post(url, **kwargs)
+
+        if self.manual_redirects:
+            while response.status_code in REDIRECT_CODES:
+                if 'location' in response.headers:
+                    url = response.headers['location']
+                    response = super(ProxySession, self).get(url, **kwargs)
+                else:
+                    return response
         return response
 
 
